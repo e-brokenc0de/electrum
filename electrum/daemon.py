@@ -229,14 +229,27 @@ class AuthenticatedServer(Logger):
             raise AuthenticationCredentialsInvalid('Invalid Credentials')
 
     async def handle(self, request):
+        # Add CORS headers for all responses
+        cors_headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': '*',  # Allow all methods
+            'Access-Control-Allow-Headers': '*',  # Allow all headers
+            'Access-Control-Allow-Credentials': 'true',
+            'Access-Control-Max-Age': '86400',  # Cache preflight for 24 hours
+        }
+        
+        # Handle preflight OPTIONS request
+        if request.method == 'OPTIONS':
+            return web.Response(headers=cors_headers)
+
         async with self.auth_lock:
             try:
                 await self.authenticate(request.headers)
             except AuthenticationInvalidOrMissing:
-                return web.Response(headers={"WWW-Authenticate": "Basic realm=Electrum"},
+                return web.Response(headers={"WWW-Authenticate": "Basic realm=Electrum", **cors_headers},
                                     text='Unauthorized', status=401)
             except AuthenticationCredentialsInvalid:
-                return web.Response(text='Forbidden', status=403)
+                return web.Response(headers=cors_headers, text='Forbidden', status=403)
         try:
             request = await request.text()
             request = json.loads(request)
@@ -248,7 +261,7 @@ class AuthenticatedServer(Logger):
             f = self._methods[method]
         except Exception as e:
             self.logger.exception("invalid request")
-            return web.Response(text='Invalid Request', status=500)
+            return web.Response(headers=cors_headers, text='Invalid Request', status=500)
         response = {
             'id': _id,
             'jsonrpc': '2.0',
@@ -273,7 +286,7 @@ class AuthenticatedServer(Logger):
                     "traceback": "".join(traceback.format_exception(e)),
                 },
             }
-        return web.json_response(response)
+        return web.json_response(response, headers=cors_headers)
 
 
 class CommandsServer(AuthenticatedServer):
@@ -291,6 +304,7 @@ class CommandsServer(AuthenticatedServer):
         self.port = self.config.RPC_PORT
         self.app = web.Application()
         self.app.router.add_post("/", self.handle)
+        self.app.router.add_options("/", self.handle)
         self.register_method(self.ping)
         self.register_method(self.gui)
         self.cmd_runner = Commands(config=self.config, network=self.daemon.network, daemon=self.daemon)
@@ -465,12 +479,9 @@ class Daemon(Logger):
     def load_wallet(self, path, password, *, upgrade=False) -> Optional[Abstract_Wallet]:
         path = standardize_path(path)
         wallet_key = self._wallet_key_from_path(path)
-        # wizard will be launched if we return
         if wallet := self._wallets.get(wallet_key):
             return wallet
         wallet = self._load_wallet(path, password, upgrade=upgrade, config=self.config)
-        if wallet.requires_unlock() and password is not None:
-            wallet.unlock(password)
         wallet.start_network(self.network)
         self.add_wallet(wallet)
         self.update_recently_opened_wallets(path)
